@@ -94,6 +94,7 @@ local noteGap       = 0.25
 -- ENGINE
 -- ============================================================
 
+-- Press a single physical key (send keydown + keyup)
 local function pressKey(kc, shift)
     if shift then VIM:SendKeyEvent(true, Enum.KeyCode.LeftShift, false, game) end
     VIM:SendKeyEvent(true, kc, false, game)
@@ -102,13 +103,22 @@ local function pressKey(kc, shift)
     if shift then VIM:SendKeyEvent(false, Enum.KeyCode.LeftShift, false, game) end
 end
 
--- Play a single key string (handles upper/lower)
-local function playKey(note)
-    local up = note == note:upper() and note ~= note:lower()
-    if up then
-        local kc = capsMap[note]; if kc then pressKey(kc, true) end
-    else
-        local kc = keyMap[note]; if kc then pressKey(kc, false) end
+-- Fire a single note key string — spawns so it doesn't block
+local function playKey(noteStr)
+    local up = noteStr == noteStr:upper() and noteStr ~= noteStr:lower()
+    task.spawn(function()
+        if up then
+            local kc = capsMap[noteStr]; if kc then pressKey(kc, true) end
+        else
+            local kc = keyMap[noteStr]; if kc then pressKey(kc, false) end
+        end
+    end)
+end
+
+-- Fire ALL keys in a chord simultaneously using task.spawn per key
+local function playChord(keys)
+    for _, noteStr in ipairs(keys) do
+        playKey(noteStr)
     end
 end
 
@@ -117,7 +127,33 @@ local function stopSong()
     if playThread then task.cancel(playThread); playThread = nil end
 end
 
-local MIN_DELAY = 0.05  -- minimum seconds between notes
+-- ── Build chord groups from flat notes array ──────────────
+-- Groups consecutive notes with d=0 into the same chord.
+-- Each group: { keys={...}, delay=N } where delay is ms after the chord
+local function buildChordGroups(notes)
+    local groups = {}
+    local i = 1
+    while i <= #notes do
+        local chord = { keys = {}, delay = 0 }
+        -- Collect all notes that belong to this chord (d=0 means "play with next")
+        while i <= #notes do
+            local n = notes[i]
+            table.insert(chord.keys, n.k)
+            i = i + 1
+            if (n.d or 0) > 0 then
+                chord.delay = n.d  -- this note carries the post-chord delay
+                break
+            end
+            -- d=0 → this note is part of a chord, keep collecting
+        end
+        if #chord.keys > 0 then
+            table.insert(groups, chord)
+        end
+    end
+    return groups
+end
+
+local MIN_DELAY = 0.05  -- minimum seconds between chords
 
 local function playSong(idx, sLbl)
     stopSong()
@@ -128,17 +164,22 @@ local function playSong(idx, sLbl)
     playThread = task.spawn(function()
         if sLbl then sLbl.Text = "▶  " .. song.name end
 
-        -- ── New format: song.notes = [{k="t", d=250}, ...]
-        -- d = milliseconds to wait AFTER this note
+        -- ── New format: song.notes = [{k="t", d=250}, {k="i", d=0}, {k="o", d=250}, ...]
+        -- d=0 means this note is part of a chord with the next note
+        -- d>0 means wait this many ms AFTER the chord
         if song.notes and type(song.notes) == "table" and #song.notes > 0 then
-            for _, note in ipairs(song.notes) do
+
+            local groups = buildChordGroups(song.notes)
+
+            for _, group in ipairs(groups) do
                 while isPaused do task.wait(0.1) end
                 if not isPlaying then break end
 
-                playKey(note.k)
+                -- Fire all keys in this chord at the same time
+                playChord(group.keys)
 
-                -- d is ms delay after this note, scaled by speed
-                local delay = (note.d or 200) / 1000  -- convert ms → seconds
+                -- Wait the post-chord delay (scaled by speed)
+                local delay = (group.delay or 200) / 1000
                 delay = delay / playSpeed
                 if delay < MIN_DELAY then delay = MIN_DELAY end
                 task.wait(delay)
