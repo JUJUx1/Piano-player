@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🎹 Auto Piano Sync Server</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+
+  :root {
+    --bg: #0a0a10;
+    --surface: #13131f;
+    --surface2: #1a1a2e;
+    --border: #252540;
+    --blue: #4d8aff;
+    --purple: #9b6dff;
+    --green: #3dd68c;
+    --red: #ff5555;
+    --yellow: #ffcc44;
+    --text: #e0e0f0;
+    --muted: #6b6b8a;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Space Grotesk', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 24px;
+  }
+
+  .header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 28px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .header h1 { font-size: 22px; font-weight: 700; }
+  .header h1 span { color: var(--blue); }
+
+  .status-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 8px var(--green);
+    animation: pulse 2s infinite;
+  }
+
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+
+  @media(max-width:700px){ .grid{ grid-template-columns:1fr; } }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+  }
+
+  .card h2 {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .big-num {
+    font-size: 42px;
+    font-weight: 700;
+    color: var(--blue);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .big-num small { font-size: 14px; color: var(--muted); font-family: 'Space Grotesk', sans-serif; }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 18px;
+    border-radius: 8px;
+    border: none;
+    cursor: pointer;
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    transition: opacity 0.15s, transform 0.1s;
+  }
+
+  .btn:active { transform: scale(0.97); }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-blue   { background: var(--blue); color: #fff; }
+  .btn-purple { background: var(--purple); color: #fff; }
+  .btn-green  { background: var(--green); color: #000; }
+  .btn-red    { background: var(--red); color: #fff; }
+  .btn:hover:not(:disabled) { opacity: 0.85; }
+
+  .log-box {
+    background: #080810;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    height: 160px;
+    overflow-y: auto;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    line-height: 1.7;
+  }
+
+  .log-line { color: var(--muted); }
+  .log-line.ok  { color: var(--green); }
+  .log-line.err { color: var(--red); }
+  .log-line.info{ color: var(--blue); }
+  .log-line.warn{ color: var(--yellow); }
+
+  .song-list {
+    max-height: 220px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .song-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    background: var(--surface2);
+    border-radius: 7px;
+    font-size: 12px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .song-item .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--blue); flex-shrink: 0;
+  }
+
+  .tag {
+    margin-left: auto;
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    background: rgba(77,138,255,0.15);
+    color: var(--blue);
+  }
+
+  .upload-zone {
+    border: 2px dashed var(--border);
+    border-radius: 10px;
+    padding: 24px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+    margin-bottom: 14px;
+  }
+
+  .upload-zone:hover, .upload-zone.drag-over {
+    border-color: var(--purple);
+    background: rgba(155,109,255,0.05);
+  }
+
+  .upload-zone p { color: var(--muted); font-size: 13px; margin-top: 8px; }
+  .upload-zone .icon { font-size: 32px; }
+  #midi-file-input { display: none; }
+
+  .form-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+
+  .form-row input, .form-row select {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 8px 12px;
+    color: var(--text);
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 12px;
+    width: 100%;
+  }
+
+  .form-row input:focus, .form-row select:focus {
+    outline: none;
+    border-color: var(--purple);
+  }
+
+  .preview-box {
+    background: #080810;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    line-height: 1.6;
+    color: var(--green);
+    word-break: break-all;
+    min-height: 48px;
+    max-height: 80px;
+    overflow-y: auto;
+    display: none;
+    margin-top: 10px;
+  }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+
+  .pill-green { background: rgba(61,214,140,0.15); color: var(--green); }
+  .pill-red   { background: rgba(255,85,85,0.15);  color: var(--red); }
+  .pill-blue  { background: rgba(77,138,255,0.15); color: var(--blue); }
+
+  .flex-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .full { grid-column: 1/-1; }
+
+  ::-webkit-scrollbar { width: 5px; height: 5px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="status-dot" id="conn-dot" style="background:var(--red);box-shadow:0 0 8px var(--red)"></div>
+  <h1>🎹 Auto Piano <span>Sync Server</span></h1>
+  <div id="conn-label" class="pill pill-red" style="margin-left:auto">Disconnected</div>
+</div>
+
+<div class="grid">
+  <!-- Stats -->
+  <div class="card">
+    <h2>📊 Stats</h2>
+    <div class="flex-row" style="margin-bottom:16px">
+      <div>
+        <div class="big-num" id="song-count">—</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:2px">songs in repo</div>
+      </div>
+      <div style="margin-left:auto;text-align:right">
+        <div style="font-size:12px;color:var(--muted)">Last sync</div>
+        <div style="font-size:13px;font-family:'JetBrains Mono',monospace" id="last-sync">Never</div>
+      </div>
+    </div>
+    <div class="flex-row">
+      <button class="btn btn-blue" id="sync-btn" onclick="triggerSync()">↻ Sync Index</button>
+      <span id="sync-status" class="pill pill-blue" style="display:none"></span>
+    </div>
+  </div>
+
+  <!-- Live log -->
+  <div class="card">
+    <h2>📡 Live Log</h2>
+    <div class="log-box" id="log"></div>
+  </div>
+
+  <!-- Song list -->
+  <div class="card">
+    <h2>🎵 Songs in Repo</h2>
+    <div class="song-list" id="song-list">
+      <div style="color:var(--muted);font-size:12px;padding:8px">Loading...</div>
+    </div>
+  </div>
+
+  <!-- MIDI Converter -->
+  <div class="card">
+    <h2>🎼 MIDI → Song Converter</h2>
+    <div class="upload-zone" id="drop-zone" onclick="document.getElementById('midi-file-input').click()">
+      <div class="icon">🎹</div>
+      <p>Drop .mid file here or click to browse</p>
+    </div>
+    <input type="file" id="midi-file-input" accept=".mid,.midi">
+
+    <div class="form-row">
+      <input type="text" id="song-name-input" placeholder="Song name">
+      <select id="category-input">
+        <option value="Custom">Custom</option>
+        <option value="Classic">Classic</option>
+        <option value="Game">Game</option>
+        <option value="Anime">Anime</option>
+        <option value="Pop">Pop</option>
+        <option value="Movie">Movie</option>
+      </select>
+    </div>
+
+    <div class="flex-row">
+      <button class="btn btn-purple" id="convert-btn" onclick="convertMidi(false)" disabled>⬇ Download JSON</button>
+      <button class="btn btn-green"  id="upload-btn"  onclick="convertMidi(true)"  disabled>⬆ Convert + Upload</button>
+    </div>
+
+    <div class="preview-box" id="sheet-preview"></div>
+  </div>
+</div>
+
+<!-- Connected clients -->
+<div class="card full" style="margin-top:0">
+  <h2>🕹 Roblox Clients</h2>
+  <div id="clients-list" style="color:var(--muted);font-size:12px;padding:4px">No clients connected</div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const socket = io();
+let songFiles = [];
+let connectedClients = 0;
+let midiFile = null;
+
+// ── Socket events ────────────────────────────────────────────
+socket.on("connect", () => {
+  setConnected(true);
+  log("Connected to server", "ok");
+  fetchIndex();
+});
+
+socket.on("disconnect", () => {
+  setConnected(false);
+  log("Disconnected", "err");
+});
+
+socket.on("sync_status", (data) => {
+  const el = document.getElementById("sync-status");
+  el.style.display = "inline-flex";
+  if (data.status === "scanning") {
+    el.className = "pill pill-blue"; el.textContent = "⏳ " + data.message;
+    log(data.message, "info");
+  } else if (data.status === "done") {
+    el.className = "pill pill-green"; el.textContent = "✓ " + data.count + " songs";
+    document.getElementById("song-count").textContent = data.count;
+    document.getElementById("last-sync").textContent = new Date().toLocaleTimeString();
+    log("index.json updated — " + data.count + " songs", "ok");
+    if (data.files) renderSongList(data.files);
+    setTimeout(() => { el.style.display = "none"; }, 3000);
+  } else if (data.status === "error") {
+    el.className = "pill pill-red"; el.textContent = "❌ Error";
+    log("Error: " + data.message, "err");
+  }
+});
+
+socket.on("songs_updated", (data) => {
+  log(`Songs updated: ${data.count} total`, "ok");
+  if (data.files) renderSongList(data.files);
+});
+
+socket.on("song_added", (data) => {
+  log(`New song added: ${data.name} (${data.filename})`, "ok");
+  fetchIndex();
+});
+
+// ── Functions ────────────────────────────────────────────────
+function setConnected(val) {
+  const dot = document.getElementById("conn-dot");
+  const lbl = document.getElementById("conn-label");
+  if (val) {
+    dot.style.background = "var(--green)"; dot.style.boxShadow = "0 0 8px var(--green)";
+    lbl.className = "pill pill-green"; lbl.textContent = "Connected";
+  } else {
+    dot.style.background = "var(--red)"; dot.style.boxShadow = "0 0 8px var(--red)";
+    lbl.className = "pill pill-red"; lbl.textContent = "Disconnected";
+  }
+}
+
+function log(msg, type = "") {
+  const box = document.getElementById("log");
+  const line = document.createElement("div");
+  line.className = "log-line " + type;
+  line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  box.appendChild(line);
+  box.scrollTop = box.scrollHeight;
+}
+
+async function fetchIndex() {
+  try {
+    const res = await fetch("/index");
+    const data = await res.json();
+    if (data.success) {
+      document.getElementById("song-count").textContent = data.count;
+      renderSongList(data.files);
+      log(`Fetched ${data.count} songs from repo`, "info");
+    }
+  } catch (e) { log("Failed to fetch index: " + e.message, "err"); }
+}
+
+function renderSongList(files) {
+  songFiles = files;
+  const el = document.getElementById("song-list");
+  if (!files || files.length === 0) {
+    el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:8px">No songs yet</div>';
+    return;
+  }
+  el.innerHTML = files.map(f => `
+    <div class="song-item">
+      <div class="dot"></div>
+      <span>${f}</span>
+      <span class="tag">.json</span>
+    </div>`).join("");
+}
+
+async function triggerSync() {
+  const btn = document.getElementById("sync-btn");
+  btn.disabled = true; btn.textContent = "⏳ Syncing...";
+  log("Manual sync triggered", "info");
+  try {
+    const res  = await fetch("/sync", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({source:"dashboard"}) });
+    const data = await res.json();
+    if (data.success) log(`Sync done: ${data.count} songs`, "ok");
+    else log("Sync failed: " + data.error, "err");
+  } catch (e) { log("Sync error: " + e.message, "err"); }
+  btn.disabled = false; btn.textContent = "↻ Sync Index";
+}
+
+// ── Drag & drop ──────────────────────────────────────────────
+const dropZone = document.getElementById("drop-zone");
+dropZone.addEventListener("dragover", e => { e.preventDefault(); dropZone.classList.add("drag-over"); });
+dropZone.addEventListener("dragleave", () => dropZone.classList.remove("drag-over"));
+dropZone.addEventListener("drop", e => {
+  e.preventDefault(); dropZone.classList.remove("drag-over");
+  const f = e.dataTransfer.files[0];
+  if (f && (f.name.endsWith(".mid") || f.name.endsWith(".midi"))) setMidiFile(f);
+  else log("Please drop a .mid file", "warn");
+});
+
+document.getElementById("midi-file-input").addEventListener("change", e => {
+  if (e.target.files[0]) setMidiFile(e.target.files[0]);
+});
+
+function setMidiFile(f) {
+  midiFile = f;
+  const nameInput = document.getElementById("song-name-input");
+  if (!nameInput.value) nameInput.value = f.name.replace(/\.(mid|midi)$/i,"").replace(/_/g," ");
+  dropZone.querySelector("p").textContent = `✓ ${f.name} (${(f.size/1024).toFixed(1)} KB)`;
+  dropZone.style.borderColor = "var(--purple)";
+  document.getElementById("convert-btn").disabled = false;
+  document.getElementById("upload-btn").disabled  = false;
+  log(`MIDI file selected: ${f.name}`, "info");
+}
+
+async function convertMidi(upload) {
+  if (!midiFile) return;
+  const name     = document.getElementById("song-name-input").value || midiFile.name;
+  const category = document.getElementById("category-input").value;
+  const btn      = upload ? document.getElementById("upload-btn") : document.getElementById("convert-btn");
+  btn.disabled   = true;
+  btn.textContent = "⏳ Converting...";
+  log(`Converting: ${name} (upload=${upload})`, "info");
+
+  const form = new FormData();
+  form.append("midi", midiFile);
+  form.append("name", name);
+  form.append("category", category);
+  form.append("upload", String(upload));
+
+  try {
+    if (!upload) {
+      // Download mode
+      const res = await fetch("/convert/download", { method: "POST", body: form });
+      if (!res.ok) { const d=await res.json(); throw new Error(d.error); }
+      const blob     = await res.blob();
+      const filename = name.toLowerCase().replace(/[^a-z0-9]/g,"_") + ".json";
+      const url = URL.createObjectURL(blob);
+      const a   = document.createElement("a"); a.href=url; a.download=filename; a.click();
+      URL.revokeObjectURL(url);
+      log(`Downloaded: ${filename}`, "ok");
+    } else {
+      const res  = await fetch("/convert", { method: "POST", body: form });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error);
+      log(`Uploaded: ${data.filename} (${data.songData.notes} notes)`, "ok");
+      const prev = document.getElementById("sheet-preview");
+      prev.style.display = "block";
+      prev.textContent   = data.preview;
+      fetchIndex();
+    }
+  } catch (e) { log("Convert error: " + e.message, "err"); }
+
+  btn.disabled = false;
+  btn.textContent = upload ? "⬆ Convert + Upload" : "⬇ Download JSON";
+}
+</script>
+</body>
+</html>
