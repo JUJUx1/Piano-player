@@ -15,7 +15,7 @@ local HttpService  = game:GetService("HttpService")
 -- Format: https://github.com/JUJUx1/Piano-player/tree/main
 -- ============================================================
 
-local GITHUB_BASE = "https://raw.githubusercontent.com/JUJUx1/piano-songs/main"
+local GITHUB_BASE = "https://raw.githubusercontent.com/JUJUx1/Piano-player/main"
 
 -- ============================================================
 -- KEY MAPS
