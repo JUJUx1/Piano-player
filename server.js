@@ -246,36 +246,51 @@ function convertMidiBuffer(buffer, songName, category) {
   // Sort by time
   allEvents.sort((a,b) => a.ms - b.ms);
 
-  // Build notes array with accurate per-note delays
-  // Each note stores: key and delay AFTER this note before the next
-  const CHORD_WINDOW = 30; // ms — notes within this window play simultaneously
-  const notes = [];
+  // ── Group notes into chords then build the notes array ──
+  // CHORD_WINDOW: notes within this many ms of each other = same chord
+  const CHORD_WINDOW = 40; // ms
 
-  for (let i = 0; i < allEvents.length; i++) {
-    const curr = allEvents[i];
-    const next = allEvents[i + 1];
-
-    let delay = 0;
-    if (next) {
-      const gap = next.ms - curr.ms;
-      // If next note is within chord window, delay = 0 (play together)
-      delay = gap < CHORD_WINDOW ? 0 : Math.round(gap);
+  // Step 1: group allEvents into chord groups
+  const chordGroups = [];
+  let i = 0;
+  while (i < allEvents.length) {
+    const group = { keys: [allEvents[i].vpKey], ms: allEvents[i].ms };
+    i++;
+    // Keep collecting notes that fall within the chord window
+    while (i < allEvents.length && (allEvents[i].ms - group.ms) <= CHORD_WINDOW) {
+      group.keys.push(allEvents[i].vpKey);
+      i++;
     }
-
-    notes.push({ k: curr.vpKey, d: delay });
+    chordGroups.push(group);
   }
 
-  // Also keep a legacy sheet string for backwards compatibility
-  const sheet = notes.map(n => n.k).join(" ");
+  // Step 2: build notes array
+  // For chords: all keys in chord get d=0 EXCEPT the last which gets the real delay
+  const notes = [];
+  for (let g = 0; g < chordGroups.length; g++) {
+    const group  = chordGroups[g];
+    const next   = chordGroups[g + 1];
+    const delay  = next ? Math.max(0, Math.round(next.ms - group.ms)) : 0;
+
+    for (let k = 0; k < group.keys.length; k++) {
+      const isLastInChord = (k === group.keys.length - 1);
+      // d=0 on all chord notes except last which carries the post-chord delay
+      notes.push({ k: group.keys[k], d: isLastInChord ? delay : 0 });
+    }
+  }
+
+  // Legacy sheet string for backwards compatibility
+  const sheet = chordGroups.map(g => g.keys.join("+")).join(" ");
 
   return {
-    name:     songName,
-    category: category || "Custom",
-    sheet,   // legacy format (keys only)
-    notes,   // new format: [{k:"t", d:250}, ...] with real timing
-    source:   "midi-converted",
-    bpm:      Math.round(60000000 / tempoMap[0].tempo),
+    name:      songName,
+    category:  category || "Custom",
+    sheet,     // legacy: "t+i+o y u" (+ = chord)
+    notes,     // timed: [{k:"t",d:0},{k:"i",d:0},{k:"o",d:250},...]
+    source:    "midi-converted",
+    bpm:       Math.round(60000000 / tempoMap[0].tempo),
     noteCount: notes.length,
+    chords:    chordGroups.filter(g => g.keys.length > 1).length,
   };
 }
 
