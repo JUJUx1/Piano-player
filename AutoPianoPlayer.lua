@@ -12,7 +12,7 @@ local HttpService  = game:GetService("HttpService")
 -- ============================================================
 -- ★  CONFIG  ★
 -- Your GitHub RAW base URL — this is always allowed by executors
--- Format: https://github.com/JUJUx1/Piano-player/tree/main
+-- Format: https://raw.githubusercontent.com/USERNAME/REPO/main
 -- ============================================================
 
 local GITHUB_BASE = "https://raw.githubusercontent.com/JUJUx1/Piano-player/main"
