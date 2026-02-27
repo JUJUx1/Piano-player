@@ -398,7 +398,51 @@ io.on("connection", (socket) => {
 // ─────────────────────────────────────────────────────────
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
+server.listen(PORT, async () => {
   console.log(`\n🎹 Auto Piano Sync Server on port ${PORT}`);
   console.log(`   GitHub: ${GITHUB_OWNER}/${GITHUB_REPO} @ ${GITHUB_BRANCH}\n`);
+
+  // ── Auto-sync on every server start/restart ──
+  console.log("[startup] Syncing index.json...");
+  try {
+    await syncIndex("server_startup");
+    console.log("[startup] Done!");
+  } catch(e) {
+    console.error("[startup] Sync failed:", e.message);
+  }
+
+  // ── Re-sync every 5 minutes as safety net ──
+  setInterval(async () => {
+    try { await syncIndex("interval_5min"); }
+    catch(e) { console.error("[interval] error:", e.message); }
+  }, 5 * 60 * 1000);
+});
+
+// ─────────────────────────────────────────────────────────
+//  GitHub Webhook endpoint
+//  In your Piano-player repo: Settings → Webhooks → Add webhook
+//  Payload URL: https://YOUR-RENDER-URL.onrender.com/webhook
+//  Content type: application/json  |  Events: Just the push event
+// ─────────────────────────────────────────────────────────
+
+app.post("/webhook", async (req, res) => {
+  const event = req.headers["x-github-event"];
+  console.log(`[webhook] GitHub event: ${event}`);
+  if (event === "push") {
+    const commits = req.body?.commits || [];
+    const touchesSongs = commits.some(c =>
+      [...(c.added||[]), ...(c.modified||[]), ...(c.removed||[])]
+        .some(f => f.startsWith("songs/"))
+    );
+    if (touchesSongs) {
+      console.log("[webhook] songs/ changed — syncing...");
+      res.json({ received: true, syncing: true });
+      try { await syncIndex("github_webhook"); }
+      catch(e) { console.error("[webhook] error:", e.message); }
+    } else {
+      res.json({ received: true, syncing: false, reason: "no songs/ changes" });
+    }
+  } else {
+    res.json({ received: true, event });
+  }
 });
