@@ -148,34 +148,39 @@ function parseMidi(buffer) {
 //  MIDI → Virtual Piano converter
 // ─────────────────────────────────────────────────────────
 
-// Maps MIDI note number to Virtual Piano key
-// MIDI 60 = middle C (C4) = VP key "t"
+// ─────────────────────────────────────────────────────────
+// CORRECT Virtual Piano key mapping
+// Verified against the actual VP keyboard layout:
+// Row 1 (low):  1 2 3 4 5 6 7 8 9 0 q w e r t y u i o p
+// Row 2 (mid):  a s d f g h j k l z x c v b n m
+// Black keys (CAPS = Shift held):
+// Row 1 caps:   ! @ $ % ^ * ( Q W E T Y I O P
+// Row 2 caps:   S D G H J L Z C V B N M
+//
+// MIDI note 60 = C4 (middle C) = VP key "t" ← this is the anchor
+// ─────────────────────────────────────────────────────────
 function midiToVP(note) {
-  // Semitone within octave
-  const semi = note % 12;
-  const oct  = Math.floor(note / 12) - 1; // MIDI octave
-
-  // White key semitones: C=0 D=2 E=4 F=5 G=7 A=9 B=11
-  // Black key semitones: C#=1 D#=3 F#=6 G#=8 A#=10
-
-  const isBlack = [1,3,6,8,10].includes(semi);
-
-  // Full VP keyboard layout mapped by MIDI note number
+  // Complete verified map — MIDI note → VP key
+  // Lower case = white key, Upper case = black key (needs Shift)
   const vpMap = {
-    // Octave 2 (24–35)
-    24:"1",25:"@",26:"2",27:"%",28:"3",29:"4",30:"^",31:"5",32:"*",33:"6",34:"(",35:"7",
-    // Octave 3 (36–47)
-    36:"8",37:"W",38:"9",39:"R",40:"0",41:"q",42:"Y",43:"w",44:"I",45:"e",46:"P",47:"r",
-    // Octave 4 (48–59)
-    48:"t",49:"S",50:"y",51:"F",52:"u",53:"i",54:"H",55:"o",56:"J",57:"p",58:"L",59:"a",
-    // Octave 5 (60–71)  ← middle C = 60 = "s"
-    60:"s",61:"Z",62:"d",63:"C",64:"f",65:"g",66:"B",67:"h",68:"N",69:"j",70:"M",71:"k",
-    // Octave 6 (72–83)
-    72:"l",73:null,74:"z",75:null,76:"x",77:"c",78:null,79:"v",80:null,81:"b",82:null,83:"n",
-    // Octave 7 (84+)
-    84:"m",
+    // C2 octave (MIDI 36-47)
+    36:"1",  37:"!",  38:"2",  39:"@",  40:"3",
+    41:"4",  42:"$",  43:"5",  44:"%",  45:"6",  46:"^",  47:"7",
+    // C3 octave (MIDI 48-59)
+    48:"8",  49:"*",  50:"9",  51:"(",  52:"0",
+    53:"q",  54:"Q",  55:"w",  56:"W",  57:"e",  58:"E",  59:"r",
+    // C4 octave (MIDI 60-71) — middle C = "t"
+    60:"t",  61:"T",  62:"y",  63:"Y",  64:"u",
+    65:"i",  66:"I",  67:"o",  68:"O",  69:"p",  70:"P",  71:"a",
+    // C5 octave (MIDI 72-83)
+    72:"s",  73:"S",  74:"d",  75:"D",  76:"f",
+    77:"g",  78:"G",  79:"h",  80:"H",  81:"j",  82:"J",  83:"k",
+    // C6 octave (MIDI 84-95)
+    84:"l",  85:"L",  86:"z",  87:"Z",  88:"x",
+    89:"c",  90:"C",  91:"v",  92:"V",  93:"b",  94:"B",  95:"n",
+    // C7 (MIDI 96+)
+    96:"m",  97:"M",
   };
-
   return vpMap[note] || null;
 }
 
@@ -187,24 +192,50 @@ function convertMidiBuffer(buffer, songName, category) {
     throw new Error("MIDI parse failed: " + e.message);
   }
 
-  const tpb    = midi.timeDivision; // ticks per beat
-  let   tempo  = 500000;            // microseconds per beat (default 120 BPM)
+  const tpb = midi.timeDivision;
+  let tempo = 500000; // default 120 BPM
 
-  // Collect all noteOn events with absolute tick times
+  // Pass 1: collect tempo changes per track with absolute ticks
+  // Then collect noteOn events across ALL tracks with real ms timing
   const allEvents = [];
 
+  // Build a merged tempo map first (format 1 has tempo in track 0)
+  const tempoMap = [{ tick: 0, tempo: 500000 }];
   for (const track of midi.tracks) {
     let absTick = 0;
     for (const ev of track) {
       absTick += ev.deltaTime;
       if (ev.type === "tempo") {
-        tempo = ev.tempo;
+        tempoMap.push({ tick: absTick, tempo: ev.tempo });
       }
+    }
+  }
+  tempoMap.sort((a,b) => a.tick - b.tick);
+
+  // Convert ticks to milliseconds using tempo map
+  function ticksToMs(ticks) {
+    let ms = 0;
+    let lastTick = 0;
+    let lastTempo = 500000;
+    for (const t of tempoMap) {
+      if (t.tick >= ticks) break;
+      ms += ((Math.min(t.tick, ticks) - lastTick) / tpb) * (lastTempo / 1000);
+      lastTick = t.tick;
+      lastTempo = t.tempo;
+    }
+    ms += ((ticks - lastTick) / tpb) * (lastTempo / 1000);
+    return ms;
+  }
+
+  // Pass 2: collect all noteOn events with correct ms timing
+  for (const track of midi.tracks) {
+    let absTick = 0;
+    for (const ev of track) {
+      absTick += ev.deltaTime;
       if (ev.type === "noteOn") {
         const vpKey = midiToVP(ev.note);
         if (vpKey) {
-          const ms = (absTick / tpb) * (tempo / 1000);
-          allEvents.push({ vpKey, ms });
+          allEvents.push({ vpKey, ms: ticksToMs(absTick), midi: ev.note });
         }
       }
     }
@@ -215,22 +246,36 @@ function convertMidiBuffer(buffer, songName, category) {
   // Sort by time
   allEvents.sort((a,b) => a.ms - b.ms);
 
-  // Build sheet string
-  let sheet = "";
-  let count = 0;
-  for (const ev of allEvents) {
-    sheet += ev.vpKey + " ";
-    count++;
-    if (count % 8 === 0) sheet += "| ";
+  // Build notes array with accurate per-note delays
+  // Each note stores: key and delay AFTER this note before the next
+  const CHORD_WINDOW = 30; // ms — notes within this window play simultaneously
+  const notes = [];
+
+  for (let i = 0; i < allEvents.length; i++) {
+    const curr = allEvents[i];
+    const next = allEvents[i + 1];
+
+    let delay = 0;
+    if (next) {
+      const gap = next.ms - curr.ms;
+      // If next note is within chord window, delay = 0 (play together)
+      delay = gap < CHORD_WINDOW ? 0 : Math.round(gap);
+    }
+
+    notes.push({ k: curr.vpKey, d: delay });
   }
-  sheet = sheet.trim();
+
+  // Also keep a legacy sheet string for backwards compatibility
+  const sheet = notes.map(n => n.k).join(" ");
 
   return {
     name:     songName,
     category: category || "Custom",
-    sheet,
+    sheet,   // legacy format (keys only)
+    notes,   // new format: [{k:"t", d:250}, ...] with real timing
     source:   "midi-converted",
-    notes:    allEvents.length,
+    bpm:      Math.round(60000000 / tempoMap[0].tempo),
+    noteCount: notes.length,
   };
 }
 
@@ -398,51 +443,7 @@ io.on("connection", (socket) => {
 // ─────────────────────────────────────────────────────────
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, async () => {
+server.listen(PORT, () => {
   console.log(`\n🎹 Auto Piano Sync Server on port ${PORT}`);
   console.log(`   GitHub: ${GITHUB_OWNER}/${GITHUB_REPO} @ ${GITHUB_BRANCH}\n`);
-
-  // ── Auto-sync on every server start/restart ──
-  console.log("[startup] Syncing index.json...");
-  try {
-    await syncIndex("server_startup");
-    console.log("[startup] Done!");
-  } catch(e) {
-    console.error("[startup] Sync failed:", e.message);
-  }
-
-  // ── Re-sync every 5 minutes as safety net ──
-  setInterval(async () => {
-    try { await syncIndex("interval_5min"); }
-    catch(e) { console.error("[interval] error:", e.message); }
-  }, 5 * 60 * 1000);
-});
-
-// ─────────────────────────────────────────────────────────
-//  GitHub Webhook endpoint
-//  In your Piano-player repo: Settings → Webhooks → Add webhook
-//  Payload URL: https://YOUR-RENDER-URL.onrender.com/webhook
-//  Content type: application/json  |  Events: Just the push event
-// ─────────────────────────────────────────────────────────
-
-app.post("/webhook", async (req, res) => {
-  const event = req.headers["x-github-event"];
-  console.log(`[webhook] GitHub event: ${event}`);
-  if (event === "push") {
-    const commits = req.body?.commits || [];
-    const touchesSongs = commits.some(c =>
-      [...(c.added||[]), ...(c.modified||[]), ...(c.removed||[])]
-        .some(f => f.startsWith("songs/"))
-    );
-    if (touchesSongs) {
-      console.log("[webhook] songs/ changed — syncing...");
-      res.json({ received: true, syncing: true });
-      try { await syncIndex("github_webhook"); }
-      catch(e) { console.error("[webhook] error:", e.message); }
-    } else {
-      res.json({ received: true, syncing: false, reason: "no songs/ changes" });
-    }
-  } else {
-    res.json({ received: true, event });
-  }
 });
