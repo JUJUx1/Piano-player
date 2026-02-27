@@ -1,8 +1,8 @@
 // ╔══════════════════════════════════════════════════════════╗
-// ║  Auto Piano Sync Server                                  ║
-// ║  - Socket.io: notifies Roblox clients of updates        ║
-// ║  - GitHub API: scans songs/ folder → updates index.json ║
-// ║  - MIDI Converter: uploads .mid → generates song JSON   ║
+// ║  Auto Piano Sync Server v2                               ║
+// ║  Dependencies: express, socket.io, @octokit/rest,       ║
+// ║                cors, dotenv, multer                      ║
+// ║  MIDI parsing: built-in (no external midi package)       ║
 // ╚══════════════════════════════════════════════════════════╝
 
 require("dotenv").config();
@@ -12,7 +12,6 @@ const { Server }  = require("socket.io");
 const cors        = require("cors");
 const multer      = require("multer");
 const path        = require("path");
-const MidiParser  = require("midi-parser-js");
 const { Octokit } = require("@octokit/rest");
 
 const app    = express();
@@ -25,9 +24,12 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }
+});
 
-// ── GitHub Config (from .env) ──────────────────────────────
+// ── GitHub config ─────────────────────────────────────────
 const GITHUB_TOKEN  = process.env.GITHUB_TOKEN;
 const GITHUB_OWNER  = process.env.GITHUB_OWNER;
 const GITHUB_REPO   = process.env.GITHUB_REPO   || "piano-songs";
@@ -35,7 +37,207 @@ const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
 
 const octokit = new Octokit({ auth: GITHUB_TOKEN });
 
-// ── Helper: get file SHA (needed to update existing files) ──
+// ─────────────────────────────────────────────────────────
+//  BUILT-IN MIDI PARSER (no external package needed)
+// ─────────────────────────────────────────────────────────
+
+class MidiReader {
+  constructor(buffer) {
+    this.buf = buffer instanceof Buffer ? buffer : Buffer.from(buffer);
+    this.pos = 0;
+  }
+  readUint8()  { return this.buf.readUInt8(this.pos++); }
+  readUint16() { const v = this.buf.readUInt16BE(this.pos); this.pos+=2; return v; }
+  readUint32() { const v = this.buf.readUInt32BE(this.pos); this.pos+=4; return v; }
+  readBytes(n) { const s = this.buf.slice(this.pos, this.pos+n); this.pos+=n; return s; }
+  readVarLen() {
+    let val=0, b;
+    do { b=this.readUint8(); val=(val<<7)|(b&0x7f); } while (b&0x80);
+    return val;
+  }
+  readString(n) { return this.readBytes(n).toString("ascii"); }
+}
+
+function parseMidi(buffer) {
+  const r = new MidiReader(buffer);
+
+  // Header chunk
+  const headerTag = r.readString(4);
+  if (headerTag !== "MThd") throw new Error("Not a valid MIDI file (bad header)");
+  r.readUint32(); // header length (always 6)
+  const format        = r.readUint16();
+  const trackCount    = r.readUint16();
+  const timeDivision  = r.readUint16();
+
+  const tracks = [];
+
+  for (let t = 0; t < trackCount; t++) {
+    const trackTag = r.readString(4);
+    if (trackTag !== "MTrk") throw new Error(`Bad track header at track ${t}`);
+    const trackLen = r.readUint32();
+    const trackEnd = r.pos + trackLen;
+
+    const events = [];
+    let lastStatus = 0;
+
+    while (r.pos < trackEnd) {
+      const deltaTime = r.readVarLen();
+      let statusByte  = r.buf.readUInt8(r.pos);
+
+      // Running status
+      if (statusByte & 0x80) {
+        lastStatus = statusByte;
+        r.pos++;
+      } else {
+        statusByte = lastStatus;
+      }
+
+      const type    = (statusByte >> 4) & 0xF;
+      const channel = statusByte & 0xF;
+
+      if (statusByte === 0xFF) {
+        // Meta event
+        const metaType = r.readUint8();
+        const metaLen  = r.readVarLen();
+        const metaData = r.readBytes(metaLen);
+        if (metaType === 0x51 && metaLen === 3) {
+          // Tempo
+          const tempo = (metaData[0] << 16) | (metaData[1] << 8) | metaData[2];
+          events.push({ deltaTime, type: "tempo", tempo });
+        } else if (metaType === 0x2F) {
+          events.push({ deltaTime, type: "end_of_track" });
+        }
+      } else if (statusByte === 0xF0 || statusByte === 0xF7) {
+        // SysEx
+        const len = r.readVarLen();
+        r.readBytes(len);
+      } else if (type === 0x9) {
+        // Note On
+        const note     = r.readUint8();
+        const velocity = r.readUint8();
+        events.push({ deltaTime, type: velocity > 0 ? "noteOn" : "noteOff", channel, note, velocity });
+      } else if (type === 0x8) {
+        // Note Off
+        const note     = r.readUint8();
+        const velocity = r.readUint8();
+        events.push({ deltaTime, type: "noteOff", channel, note, velocity });
+      } else if (type === 0xA) {
+        r.readUint8(); r.readUint8(); // aftertouch
+      } else if (type === 0xB) {
+        r.readUint8(); r.readUint8(); // control change
+      } else if (type === 0xC) {
+        r.readUint8(); // program change
+      } else if (type === 0xD) {
+        r.readUint8(); // channel pressure
+      } else if (type === 0xE) {
+        r.readUint8(); r.readUint8(); // pitch bend
+      } else {
+        // Unknown — skip 1 byte to avoid infinite loop
+        r.pos++;
+      }
+    }
+
+    r.pos = trackEnd; // safety
+    tracks.push(events);
+  }
+
+  return { format, trackCount, timeDivision, tracks };
+}
+
+// ─────────────────────────────────────────────────────────
+//  MIDI → Virtual Piano converter
+// ─────────────────────────────────────────────────────────
+
+// Maps MIDI note number to Virtual Piano key
+// MIDI 60 = middle C (C4) = VP key "t"
+function midiToVP(note) {
+  // Semitone within octave
+  const semi = note % 12;
+  const oct  = Math.floor(note / 12) - 1; // MIDI octave
+
+  // White key semitones: C=0 D=2 E=4 F=5 G=7 A=9 B=11
+  // Black key semitones: C#=1 D#=3 F#=6 G#=8 A#=10
+
+  const isBlack = [1,3,6,8,10].includes(semi);
+
+  // Full VP keyboard layout mapped by MIDI note number
+  const vpMap = {
+    // Octave 2 (24–35)
+    24:"1",25:"@",26:"2",27:"%",28:"3",29:"4",30:"^",31:"5",32:"*",33:"6",34:"(",35:"7",
+    // Octave 3 (36–47)
+    36:"8",37:"W",38:"9",39:"R",40:"0",41:"q",42:"Y",43:"w",44:"I",45:"e",46:"P",47:"r",
+    // Octave 4 (48–59)
+    48:"t",49:"S",50:"y",51:"F",52:"u",53:"i",54:"H",55:"o",56:"J",57:"p",58:"L",59:"a",
+    // Octave 5 (60–71)  ← middle C = 60 = "s"
+    60:"s",61:"Z",62:"d",63:"C",64:"f",65:"g",66:"B",67:"h",68:"N",69:"j",70:"M",71:"k",
+    // Octave 6 (72–83)
+    72:"l",73:null,74:"z",75:null,76:"x",77:"c",78:null,79:"v",80:null,81:"b",82:null,83:"n",
+    // Octave 7 (84+)
+    84:"m",
+  };
+
+  return vpMap[note] || null;
+}
+
+function convertMidiBuffer(buffer, songName, category) {
+  let midi;
+  try {
+    midi = parseMidi(buffer);
+  } catch(e) {
+    throw new Error("MIDI parse failed: " + e.message);
+  }
+
+  const tpb    = midi.timeDivision; // ticks per beat
+  let   tempo  = 500000;            // microseconds per beat (default 120 BPM)
+
+  // Collect all noteOn events with absolute tick times
+  const allEvents = [];
+
+  for (const track of midi.tracks) {
+    let absTick = 0;
+    for (const ev of track) {
+      absTick += ev.deltaTime;
+      if (ev.type === "tempo") {
+        tempo = ev.tempo;
+      }
+      if (ev.type === "noteOn") {
+        const vpKey = midiToVP(ev.note);
+        if (vpKey) {
+          const ms = (absTick / tpb) * (tempo / 1000);
+          allEvents.push({ vpKey, ms });
+        }
+      }
+    }
+  }
+
+  if (allEvents.length === 0) throw new Error("No playable notes found in this MIDI file");
+
+  // Sort by time
+  allEvents.sort((a,b) => a.ms - b.ms);
+
+  // Build sheet string
+  let sheet = "";
+  let count = 0;
+  for (const ev of allEvents) {
+    sheet += ev.vpKey + " ";
+    count++;
+    if (count % 8 === 0) sheet += "| ";
+  }
+  sheet = sheet.trim();
+
+  return {
+    name:     songName,
+    category: category || "Custom",
+    sheet,
+    source:   "midi-converted",
+    notes:    allEvents.length,
+  };
+}
+
+// ─────────────────────────────────────────────────────────
+//  GitHub helpers
+// ─────────────────────────────────────────────────────────
+
 async function getFileSHA(filePath) {
   try {
     const { data } = await octokit.repos.getContent({
@@ -43,12 +245,9 @@ async function getFileSHA(filePath) {
       path: filePath, ref: GITHUB_BRANCH,
     });
     return data.sha;
-  } catch (e) {
-    return null; // file doesn't exist yet
-  }
+  } catch { return null; }
 }
 
-// ── Helper: list all .json files inside songs/ folder ───────
 async function getSongFilenames() {
   try {
     const { data } = await octokit.repos.getContent({
@@ -56,322 +255,150 @@ async function getSongFilenames() {
       path: "songs", ref: GITHUB_BRANCH,
     });
     if (!Array.isArray(data)) return [];
-    return data
-      .filter(f => f.type === "file" && f.name.endsWith(".json"))
-      .map(f => f.name);
-  } catch (e) {
-    console.error("getSongFilenames error:", e.message);
+    return data.filter(f => f.type==="file" && f.name.endsWith(".json")).map(f => f.name);
+  } catch(e) {
+    console.error("getSongFilenames:", e.message);
     return [];
   }
 }
 
-// ── Core: scan songs/ folder and update index.json ──────────
-async function syncIndex(triggeredBy = "server") {
+async function syncIndex(triggeredBy="server") {
   console.log(`[sync] Triggered by: ${triggeredBy}`);
-  io.emit("sync_status", { status: "scanning", message: "Scanning songs/ folder..." });
+  io.emit("sync_status", { status:"scanning", message:"Scanning songs/ folder..." });
 
   const filenames = await getSongFilenames();
-  console.log(`[sync] Found ${filenames.length} song files:`, filenames);
+  console.log(`[sync] Found ${filenames.length} files`);
 
-  const indexContent = JSON.stringify(filenames, null, 2);
-  const encoded      = Buffer.from(indexContent).toString("base64");
-  const sha          = await getFileSHA("index.json");
+  const encoded = Buffer.from(JSON.stringify(filenames, null, 2)).toString("base64");
+  const sha     = await getFileSHA("index.json");
 
   try {
     await octokit.repos.createOrUpdateFileContents({
-      owner:   GITHUB_OWNER,
-      repo:    GITHUB_REPO,
-      path:    "index.json",
+      owner: GITHUB_OWNER, repo: GITHUB_REPO,
+      path: "index.json",
       message: `Auto-sync index.json (${filenames.length} songs) [${triggeredBy}]`,
-      content: encoded,
-      branch:  GITHUB_BRANCH,
+      content: encoded, branch: GITHUB_BRANCH,
       ...(sha ? { sha } : {}),
     });
-
-    const result = { status: "done", count: filenames.length, files: filenames };
-    console.log(`[sync] index.json updated with ${filenames.length} songs`);
-    io.emit("sync_status", { ...result, message: `index.json updated — ${filenames.length} songs` });
-    io.emit("songs_updated", { count: filenames.length, files: filenames });
+    const result = { status:"done", count:filenames.length, files:filenames };
+    io.emit("sync_status", { ...result, message:`index.json updated — ${filenames.length} songs` });
+    io.emit("songs_updated", result);
+    console.log(`[sync] Done — ${filenames.length} songs`);
     return result;
-  } catch (e) {
-    console.error("[sync] GitHub write error:", e.message);
-    io.emit("sync_status", { status: "error", message: e.message });
+  } catch(e) {
+    console.error("[sync] Error:", e.message);
+    io.emit("sync_status", { status:"error", message:e.message });
     throw e;
   }
 }
 
-// ╔══════════════════════════════════════════════════════════╗
-// ║  MIDI → Virtual Piano Sheet Converter                    ║
-// ╚══════════════════════════════════════════════════════════╝
-
-// Virtual Piano key mapping (MIDI note number → VP key)
-// MIDI 60 = C4 (middle C)
-const MIDI_TO_VP = {};
-
-// White keys: C D E F G A B across octaves
-// VP layout: 1 2 3 4 5 6 7 8 9 0 q w e r t y u i o p a s d f g h j k l z x c v b n m
-const WHITE_KEYS = [
-  //  C    D    E    F    G    A    B
-  // Octave 1 (MIDI 24-35)
-  null, null, null, null, null, null, null,
-  // Octave 2 (MIDI 36-47) → VP: 1 2 3 4 5 6 7
-  "1","2","3","4","5","6","7",
-  // Octave 3 (MIDI 48-59) → VP: 8 9 0 q w e r
-  "8","9","0","q","w","e","r",
-  // Octave 4 (MIDI 60-71) → VP: t y u i o p a  (middle C = t)
-  "t","y","u","i","o","p","a",
-  // Octave 5 (MIDI 72-83) → VP: s d f g h j k
-  "s","d","f","g","h","j","k",
-  // Octave 6 (MIDI 84-95) → VP: l z x c v b n
-  "l","z","x","c","v","b","n",
-  // Octave 7 (MIDI 96-107) → VP: m
-  "m",
-];
-
-const BLACK_KEYS = [
-  // Octave 2 (MIDI 37,39,42,44,46) → VP CAPS
-  null,"@",null,"%",null,null,"^",null,"*",null,"(",null,
-  // Octave 3
-  null,"W",null,"R",null,null,"Y",null,"I",null,"P",null,
-  // Octave 4
-  null,"S",null,"F",null,null,"H",null,"J",null,"L",null,
-  // Octave 5
-  null,"Z",null,"C",null,null,"B",null,"N",null,"M",null,
-  // Octave 6
-  null,null,null,null,null,null,null,null,null,null,null,null,
-];
-
-function midiNoteToVP(midiNote) {
-  if (midiNote < 24 || midiNote > 107) return null;
-  const offset = midiNote - 24;
-
-  // Semitone pattern within octave: C C# D D# E F F# G G# A A# B
-  const semitone = midiNote % 12;
-  const isBlack  = [1,3,6,8,10].includes(semitone);
-
-  if (isBlack) {
-    return BLACK_KEYS[offset] || null;
-  } else {
-    return WHITE_KEYS[offset] || null;
-  }
-}
-
-function convertMidiBuffer(buffer, songName, category) {
-  const uint8 = new Uint8Array(buffer);
-  let parsed;
-
-  try {
-    parsed = MidiParser.parse(uint8);
-  } catch (e) {
-    throw new Error("Failed to parse MIDI: " + e.message);
-  }
-
-  const ticksPerBeat = parsed.timeDivision || 480;
-  let tempo = 500000; // default 120 BPM
-
-  // Collect all note events with absolute times
-  const events = [];
-
-  for (const track of parsed.track) {
-    let absoluteTick = 0;
-    for (const event of track.event) {
-      absoluteTick += event.deltaTime || 0;
-
-      if (event.type === 0xFF && event.metaType === 0x51) {
-        // Tempo change
-        tempo = event.data;
-      }
-
-      if ((event.type === 0x09 || event.type === 9) && event.data[1] > 0) {
-        // Note on with velocity > 0
-        const vpKey = midiNoteToVP(event.data[0]);
-        if (vpKey) {
-          const timeMs = (absoluteTick / ticksPerBeat) * (tempo / 1000);
-          events.push({ key: vpKey, timeMs });
-        }
-      }
-    }
-  }
-
-  if (events.length === 0) {
-    throw new Error("No playable notes found in MIDI file");
-  }
-
-  // Sort by time
-  events.sort((a, b) => a.timeMs - b.timeMs);
-
-  // Build sheet string with timing
-  // Group notes that happen at (nearly) the same time
-  const CHORD_THRESHOLD = 30; // ms — notes within this are "simultaneous"
-  const MIN_GAP = 80; // ms minimum gap to insert a separator
-
-  let sheet = "";
-  let prevTime = events[0].timeMs;
-  let noteCount = 0;
-
-  for (let i = 0; i < events.length; i++) {
-    const ev = events[i];
-    const gap = ev.timeMs - prevTime;
-
-    if (i > 0 && gap > MIN_GAP) {
-      // Insert bar separator every ~8 notes for readability
-      if (noteCount > 0 && noteCount % 8 === 0) sheet += "| ";
-    }
-
-    sheet += ev.key + " ";
-    prevTime = ev.timeMs;
-    noteCount++;
-  }
-
-  sheet = sheet.trim();
-
-  return {
-    name:     songName,
-    category: category || "Custom",
-    sheet:    sheet,
-    source:   "midi-converted",
-    notes:    events.length,
-  };
-}
-
-// ── Upload a converted song to GitHub ───────────────────────
 async function uploadSongToGitHub(songData, filename) {
-  const content = JSON.stringify(songData, null, 2);
-  const encoded = Buffer.from(content).toString("base64");
+  const encoded = Buffer.from(JSON.stringify(songData, null, 2)).toString("base64");
   const sha     = await getFileSHA(`songs/${filename}`);
-
   await octokit.repos.createOrUpdateFileContents({
-    owner:   GITHUB_OWNER,
-    repo:    GITHUB_REPO,
-    path:    `songs/${filename}`,
+    owner: GITHUB_OWNER, repo: GITHUB_REPO,
+    path: `songs/${filename}`,
     message: `Add song: ${songData.name}`,
-    content: encoded,
-    branch:  GITHUB_BRANCH,
+    content: encoded, branch: GITHUB_BRANCH,
     ...(sha ? { sha } : {}),
   });
 }
 
-// ╔══════════════════════════════════════════════════════════╗
-// ║  REST ENDPOINTS                                          ║
-// ╚══════════════════════════════════════════════════════════╝
+// ─────────────────────────────────────────────────────────
+//  Routes
+// ─────────────────────────────────────────────────────────
 
-// Health check
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
 app.get("/health", (req, res) => {
-  res.json({ status: "ok", server: "Auto Piano Sync", uptime: process.uptime() });
+  res.json({ status:"ok", uptime: process.uptime() });
 });
 
-// Manual sync trigger (called by Roblox on script load or reload)
 app.post("/sync", async (req, res) => {
-  const triggeredBy = req.body?.source || "api";
   try {
-    const result = await syncIndex(triggeredBy);
-    res.json({ success: true, ...result });
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
+    const result = await syncIndex(req.body?.source || "api");
+    res.json({ success:true, ...result });
+  } catch(e) {
+    res.status(500).json({ success:false, error:e.message });
   }
 });
 
-// GET current index (reads from GitHub)
 app.get("/index", async (req, res) => {
   try {
     const files = await getSongFilenames();
-    res.json({ success: true, count: files.length, files });
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
+    res.json({ success:true, count:files.length, files });
+  } catch(e) {
+    res.status(500).json({ success:false, error:e.message });
   }
 });
 
-// Upload + convert a MIDI file
+// Convert MIDI + optionally upload to GitHub
 app.post("/convert", upload.single("midi"), async (req, res) => {
-  if (!req.file) return res.status(400).json({ success: false, error: "No MIDI file uploaded" });
-
-  const songName  = req.body.name     || path.basename(req.file.originalname, ".mid");
-  const category  = req.body.category || "Custom";
-  const autoUpload = req.body.upload === "true";
-
+  if (!req.file) return res.status(400).json({ success:false, error:"No MIDI file" });
+  const songName   = req.body.name     || path.basename(req.file.originalname, path.extname(req.file.originalname));
+  const category   = req.body.category || "Custom";
+  const autoUpload = req.body.upload   === "true";
   try {
     const songData = convertMidiBuffer(req.file.buffer, songName, category);
-    const filename = songName.toLowerCase().replace(/[^a-z0-9]/g, "_") + ".json";
-
+    const filename = songName.toLowerCase().replace(/[^a-z0-9]/g,"_") + ".json";
     if (autoUpload) {
       await uploadSongToGitHub(songData, filename);
-      // Auto-sync index after upload
       await syncIndex("midi-upload");
-      io.emit("song_added", { filename, name: songName });
+      io.emit("song_added", { filename, name:songName });
     }
-
-    res.json({
-      success:  true,
-      filename,
-      songData,
-      uploaded: autoUpload,
-      preview:  songData.sheet.slice(0, 120) + (songData.sheet.length > 120 ? "..." : ""),
-    });
-  } catch (e) {
-    console.error("[convert] Error:", e.message);
-    res.status(500).json({ success: false, error: e.message });
+    res.json({ success:true, filename, songData, uploaded:autoUpload,
+      preview: songData.sheet.slice(0,120) + (songData.sheet.length>120?"...":"") });
+  } catch(e) {
+    console.error("[convert]", e.message);
+    res.status(500).json({ success:false, error:e.message });
   }
 });
 
-// Download converted song JSON directly (without GitHub upload)
+// Convert + download (no GitHub upload)
 app.post("/convert/download", upload.single("midi"), async (req, res) => {
-  if (!req.file) return res.status(400).json({ success: false, error: "No file" });
-
-  const songName = req.body.name     || path.basename(req.file.originalname, ".mid");
+  if (!req.file) return res.status(400).json({ success:false, error:"No file" });
+  const songName = req.body.name     || path.basename(req.file.originalname, path.extname(req.file.originalname));
   const category = req.body.category || "Custom";
-
   try {
     const songData = convertMidiBuffer(req.file.buffer, songName, category);
-    const filename = songName.toLowerCase().replace(/[^a-z0-9]/g, "_") + ".json";
+    const filename = songName.toLowerCase().replace(/[^a-z0-9]/g,"_") + ".json";
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     res.setHeader("Content-Type", "application/json");
     res.send(JSON.stringify(songData, null, 2));
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
+  } catch(e) {
+    res.status(500).json({ success:false, error:e.message });
   }
 });
 
-// ╔══════════════════════════════════════════════════════════╗
-// ║  SOCKET.IO                                               ║
-// ╚══════════════════════════════════════════════════════════╝
+// ─────────────────────────────────────────────────────────
+//  Socket.io
+// ─────────────────────────────────────────────────────────
 
 io.on("connection", (socket) => {
-  const clientIp = socket.handshake.address;
-  console.log(`[socket] Client connected: ${socket.id} (${clientIp})`);
+  console.log(`[socket] Connected: ${socket.id}`);
 
-  // When Roblox script loads → trigger index sync
-  socket.on("roblox_loaded", async (data) => {
-    console.log(`[socket] Roblox loaded event from ${socket.id}:`, data);
-    socket.emit("sync_status", { status: "scanning", message: "Syncing index..." });
-    try {
-      await syncIndex("roblox_load");
-    } catch (e) {
-      socket.emit("sync_status", { status: "error", message: e.message });
-    }
+  socket.on("roblox_loaded", async () => {
+    console.log(`[socket] Roblox load from ${socket.id}`);
+    try { await syncIndex("roblox_load"); }
+    catch(e) { socket.emit("sync_status", { status:"error", message:e.message }); }
   });
 
-  // Manual reload request from Roblox
   socket.on("request_sync", async () => {
-    try {
-      await syncIndex("roblox_reload");
-    } catch (e) {
-      socket.emit("sync_status", { status: "error", message: e.message });
-    }
+    try { await syncIndex("roblox_reload"); }
+    catch(e) { socket.emit("sync_status", { status:"error", message:e.message }); }
   });
 
-  socket.on("disconnect", () => {
-    console.log(`[socket] Client disconnected: ${socket.id}`);
-  });
+  socket.on("disconnect", () => console.log(`[socket] Disconnected: ${socket.id}`));
 });
 
-// ── Start server ─────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────
+//  Start
+// ─────────────────────────────────────────────────────────
+
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`\n🎹 Auto Piano Sync Server running on port ${PORT}`);
-  console.log(`   GitHub: ${GITHUB_OWNER}/${GITHUB_REPO} (${GITHUB_BRANCH})`);
-  console.log(`   Dashboard: http://localhost:${PORT}\n`);
+  console.log(`\n🎹 Auto Piano Sync Server on port ${PORT}`);
+  console.log(`   GitHub: ${GITHUB_OWNER}/${GITHUB_REPO} @ ${GITHUB_BRANCH}\n`);
 });
