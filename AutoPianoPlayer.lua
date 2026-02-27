@@ -62,13 +62,20 @@ local keyMap = {
     ["x"]=Enum.KeyCode.X,["c"]=Enum.KeyCode.C,["v"]=Enum.KeyCode.V,["b"]=Enum.KeyCode.B,
     ["n"]=Enum.KeyCode.N,["m"]=Enum.KeyCode.M,
 }
+-- CAPS = black keys (Shift held). Must match server midiToVP mapping exactly.
 local capsMap = {
-    ["Q"]=Enum.KeyCode.Q,["W"]=Enum.KeyCode.W,["E"]=Enum.KeyCode.E,["R"]=Enum.KeyCode.R,
-    ["T"]=Enum.KeyCode.T,["Y"]=Enum.KeyCode.Y,["U"]=Enum.KeyCode.U,["I"]=Enum.KeyCode.I,
-    ["O"]=Enum.KeyCode.O,["P"]=Enum.KeyCode.P,["S"]=Enum.KeyCode.S,["D"]=Enum.KeyCode.D,
-    ["G"]=Enum.KeyCode.G,["H"]=Enum.KeyCode.H,["J"]=Enum.KeyCode.J,["L"]=Enum.KeyCode.L,
-    ["Z"]=Enum.KeyCode.Z,["C"]=Enum.KeyCode.C,["V"]=Enum.KeyCode.V,["B"]=Enum.KeyCode.B,
-    ["N"]=Enum.KeyCode.N,["M"]=Enum.KeyCode.M,
+    -- Row 1 black keys
+    ["!"]=Enum.KeyCode.One,  ["@"]=Enum.KeyCode.Two,  ["$"]=Enum.KeyCode.Four,
+    ["%"]=Enum.KeyCode.Five, ["^"]=Enum.KeyCode.Six,  ["*"]=Enum.KeyCode.Eight,
+    ["("]=Enum.KeyCode.Nine,
+    -- Row 2 black keys (letter keys with shift)
+    ["Q"]=Enum.KeyCode.Q, ["W"]=Enum.KeyCode.W, ["E"]=Enum.KeyCode.E,
+    ["T"]=Enum.KeyCode.T, ["Y"]=Enum.KeyCode.Y, ["I"]=Enum.KeyCode.I,
+    ["O"]=Enum.KeyCode.O, ["P"]=Enum.KeyCode.P, ["S"]=Enum.KeyCode.S,
+    ["D"]=Enum.KeyCode.D, ["G"]=Enum.KeyCode.G, ["H"]=Enum.KeyCode.H,
+    ["J"]=Enum.KeyCode.J, ["L"]=Enum.KeyCode.L, ["Z"]=Enum.KeyCode.Z,
+    ["C"]=Enum.KeyCode.C, ["V"]=Enum.KeyCode.V, ["B"]=Enum.KeyCode.B,
+    ["N"]=Enum.KeyCode.N, ["M"]=Enum.KeyCode.M,
 }
 
 -- ============================================================
@@ -90,15 +97,19 @@ local noteGap       = 0.25
 local function pressKey(kc, shift)
     if shift then VIM:SendKeyEvent(true, Enum.KeyCode.LeftShift, false, game) end
     VIM:SendKeyEvent(true, kc, false, game)
-    task.wait(0.05)
+    task.wait(0.04)
     VIM:SendKeyEvent(false, kc, false, game)
     if shift then VIM:SendKeyEvent(false, Enum.KeyCode.LeftShift, false, game) end
 end
 
-local function parseSheet(s)
-    local n = {}
-    for t in s:gmatch("%S+") do if t ~= "|" then table.insert(n, t) end end
-    return n
+-- Play a single key string (handles upper/lower)
+local function playKey(note)
+    local up = note == note:upper() and note ~= note:lower()
+    if up then
+        local kc = capsMap[note]; if kc then pressKey(kc, true) end
+    else
+        local kc = keyMap[note]; if kc then pressKey(kc, false) end
+    end
 end
 
 local function stopSong()
@@ -106,24 +117,47 @@ local function stopSong()
     if playThread then task.cancel(playThread); playThread = nil end
 end
 
+local MIN_DELAY = 0.05  -- minimum seconds between notes
+
 local function playSong(idx, sLbl)
     stopSong()
     local song = songs[idx]
     if not song then return end
     isPlaying = true; isPaused = false
+
     playThread = task.spawn(function()
         if sLbl then sLbl.Text = "▶  " .. song.name end
-        for _, note in ipairs(parseSheet(song.sheet)) do
-            while isPaused do task.wait(0.1) end
-            if not isPlaying then break end
-            local up = note == note:upper() and note ~= note:lower()
-            if up then
-                local kc = capsMap[note]; if kc then pressKey(kc, true) end
-            else
-                local kc = keyMap[note]; if kc then pressKey(kc, false) end
+
+        -- ── New format: song.notes = [{k="t", d=250}, ...]
+        -- d = milliseconds to wait AFTER this note
+        if song.notes and type(song.notes) == "table" and #song.notes > 0 then
+            for _, note in ipairs(song.notes) do
+                while isPaused do task.wait(0.1) end
+                if not isPlaying then break end
+
+                playKey(note.k)
+
+                -- d is ms delay after this note, scaled by speed
+                local delay = (note.d or 200) / 1000  -- convert ms → seconds
+                delay = delay / playSpeed
+                if delay < MIN_DELAY then delay = MIN_DELAY end
+                task.wait(delay)
             end
-            task.wait(noteGap / playSpeed)
+
+        -- ── Legacy format: song.sheet = "t y u i o p a s"
+        else
+            local notes = {}
+            for t in (song.sheet or ""):gmatch("%S+") do
+                if t ~= "|" then table.insert(notes, t) end
+            end
+            for _, note in ipairs(notes) do
+                while isPaused do task.wait(0.1) end
+                if not isPlaying then break end
+                playKey(note)
+                task.wait(noteGap / playSpeed)
+            end
         end
+
         isPlaying = false
         if sLbl then sLbl.Text = "✓  Done: " .. song.name end
     end)
